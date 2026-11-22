@@ -6,14 +6,15 @@ It never talks to an LLM directly: it calls providers.ask_provider()
 and gets back a standardized result dictionary.
 """
 
-from providers import ask_provider
+from providers import PROVIDER_NAMES, ask_provider
 
 LINE = "-" * 40
 DOUBLE_LINE = "=" * 40
 
 # Menu number -> provider name. Adding a provider means adding one line here.
 PROVIDER_MENU_OPTIONS = {"1": "OpenAI", "2": "Gemini", "3": "Claude"}
-EXIT_OPTION = "4"
+COMPARE_OPTION = "4"
+EXIT_OPTION = "5"
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,7 @@ def show_menu():
     print()
     for number, provider_name in PROVIDER_MENU_OPTIONS.items():
         print(f"{number}. Ask {provider_name}")
+    print(f"{COMPARE_OPTION}. Compare all providers")
     print(f"{EXIT_OPTION}. Exit")
     print()
 
@@ -76,6 +78,41 @@ def display_single_result(result):
     print(LINE)
 
 
+def display_comparison(prompt, results):
+    print()
+    print(DOUBLE_LINE)
+    print("         MODEL COMPARISON")
+    print(DOUBLE_LINE)
+    print(f"\nPrompt:\n{prompt}\n")
+
+    for result in results:
+        print(LINE)
+        print(f"{result['provider'].upper()}  ({result['model']})")
+        print(LINE)
+        print_result_body(result)
+        print()
+
+    print_comparison_summary(results)
+
+
+def format_optional(value, suffix=""):
+    """Show 'n/a' for unknown values instead of pretending we know them."""
+    return "n/a" if value is None else f"{value}{suffix}"
+
+
+def print_comparison_summary(results):
+    """A compact table of the numbers side by side. It does not pick a winner."""
+    print(LINE)
+    print("SUMMARY")
+    print(LINE)
+    print(f"{'Provider':<10}{'In tok':<9}{'Out tok':<9}")
+    for result in results:
+        print(f"{result['provider']:<10}"
+              f"{format_optional(result['input_tokens']):<9}"
+              f"{format_optional(result['output_tokens']):<9}")
+    print(LINE)
+
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
@@ -89,6 +126,20 @@ def run_single_provider(provider_name):
     display_single_result(result)
 
 
+def run_comparison():
+    prompt = read_prompt()
+    if prompt is None:
+        return
+
+    # Requests run one after another (sequentially) to keep things simple.
+    results = []
+    for provider_name in PROVIDER_NAMES:
+        print(f"Asking {provider_name}... please wait.")
+        results.append(ask_provider(provider_name, prompt))
+
+    display_comparison(prompt, results)
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -100,6 +151,8 @@ def main():
 
         if choice in PROVIDER_MENU_OPTIONS:
             run_single_provider(PROVIDER_MENU_OPTIONS[choice])
+        elif choice == COMPARE_OPTION:
+            run_comparison()
         elif choice == EXIT_OPTION:
             print("\nGoodbye!")
             break
