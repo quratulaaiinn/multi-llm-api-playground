@@ -10,18 +10,23 @@ shape (see build_result), so main.py can display any provider's answer
 with the same code.
 """
 
+import logging
 import os
+import time
 from pathlib import Path
 
 import anthropic
 import openai
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
 # Load the .env file that sits next to this file. Using an absolute path
 # means it works even if you run `python main.py` from another folder.
 load_dotenv(Path(__file__).parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 # How long to wait for a provider before giving up.
 REQUEST_TIMEOUT_SECONDS = 60
@@ -38,6 +43,11 @@ PROVIDER_SETTINGS = {
 }
 
 PROVIDER_NAMES = list(PROVIDER_SETTINGS.keys())
+
+# Values in .env.example start with this, e.g. "your_openai_api_key".
+# A value that still starts with it hasn't been filled in yet.
+PLACEHOLDER_PREFIX = "your_"
+
 
 # ---------------------------------------------------------------------------
 # Standardized result
@@ -67,6 +77,27 @@ def build_result(provider, model, text=None, latency_seconds=None,
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+def get_config_problems(provider_name):
+    """
+    Return a list of human-readable problems with a provider's configuration.
+    An empty list means the API key and model are both set.
+    """
+    settings = PROVIDER_SETTINGS[provider_name]
+    problems = []
+    for variable in (settings["key_variable"], settings["model_variable"]):
+        value = os.getenv(variable, "").strip()
+        if not value:
+            problems.append(f"{variable} is not set in your .env file")
+        elif value.startswith(PLACEHOLDER_PREFIX):
+            problems.append(f"{variable} still has the placeholder value from .env.example")
+    return problems
+
+
+def is_configured(provider_name):
+    """True if the provider has a real API key and model name set."""
+    return not get_config_problems(provider_name)
+
 
 def get_api_key_and_model(provider_name):
     """Read a provider's API key and model name from the environment."""
@@ -145,13 +176,124 @@ PROVIDER_FUNCTIONS = {
 
 
 # ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+
+def get_http_status(error):
+    """
+    Return the HTTP status code carried by an SDK error, or None.
+
+    OpenAI and Anthropic put it in `.status_code`; Google's SDK uses `.code`.
+    Reading it in one place lets us treat all three providers' errors alike.
+    """
+    if isinstance(error, (openai.APIStatusError, anthropic.APIStatusError)):
+        return error.status_code
+    if isinstance(error, genai_errors.APIError):
+        return error.code
+    return None
+
+
+def get_error_family_names(error):
+    """
+    Return the class names of an error and all of its parent classes.
+
+    OpenAI and Anthropic wrap network problems in their own error classes,
+    but Google's SDK lets the HTTP library's errors (e.g. "ReadTimeout",
+    a kind of "TimeoutException") pass straight through. Checking names
+    lets us recognize those without importing the HTTP library ourselves.
+    """
+    return {cls.__name__ for cls in type(error).__mro__}
+
+
+def classify_error(error):
+    """
+    Turn any exception into (category, friendly_message).
+
+    The friendly message never includes the raw SDK message, because raw
+    messages can contain request details or part of an API key.
+    """
+    family_names = get_error_family_names(error)
+
+    # Check timeouts first: in the OpenAI/Anthropic SDKs a timeout error is
+    # a special kind of connection error, so the order matters.
+    if (isinstance(error, (openai.APITimeoutError, anthropic.APITimeoutError, TimeoutError))
+            or "TimeoutException" in family_names):
+        return "timeout", "the request timed out. The provider may be slow; please try again."
+
+    if (isinstance(error, (openai.APIConnectionError, anthropic.APIConnectionError, ConnectionError))
+            or "NetworkError" in family_names):
+        return "network", "could not connect to the provider. Check your internet connection."
+
+    status = get_http_status(error)
+    if status == 400:
+        return "invalid_request", "the request was rejected as invalid (HTTP 400). Check your prompt and model settings."
+    if status == 401:
+        return "authentication", "authentication failed (HTTP 401). Check that your API key is correct."
+    if status == 403:
+        return "permission", "access denied (HTTP 403). Your key may not have access to this model."
+    if status == 404:
+        return "not_found", "model not found (HTTP 404). Check the model name in your .env file."
+    if status == 429:
+        return "rate_limit", "API rate limit or quota reached (HTTP 429). Please try again later."
+    if status is not None and status >= 500:
+        return "server_error", f"the provider had a server error (HTTP {status}). Please try again later."
+    if status is not None:
+        return "api_error", f"the provider returned an error (HTTP {status})."
+
+    return "unexpected", f"an unexpected error occurred ({type(error).__name__})."
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
 def ask_provider(provider_name, prompt):
-    """Send `prompt` to one provider and return a standardized result dictionary."""
+    """
+    Send `prompt` to one provider and return a standardized result dictionary.
+
+    This function never raises: every failure is caught and returned as an
+    error result, so one broken provider can't crash the app.
+    """
     api_key, model = get_api_key_and_model(provider_name)
+    model_label = model or "not configured"
+
+    # 1. Stop early with a clear message if the .env file is incomplete.
+    problems = get_config_problems(provider_name)
+    if problems:
+        logger.warning("%s not configured: %s", provider_name, "; ".join(problems))
+        message = f"{provider_name} is not configured: " + "; ".join(problems) + "."
+        return build_result(provider_name, model_label, error=message)
+
+    # We log the prompt's length, not its content, to protect user data.
+    logger.info("Request started | provider=%s | model=%s | prompt_chars=%d",
+                provider_name, model, len(prompt))
+
+    # 2. Call the provider and time how long it takes.
     provider_function = PROVIDER_FUNCTIONS[provider_name]
-    text, input_tokens, output_tokens = provider_function(prompt, api_key, model)
-    return build_result(provider_name, model, text=text,
+    start_time = time.perf_counter()
+    try:
+        text, input_tokens, output_tokens = provider_function(prompt, api_key, model)
+    except Exception as error:  # Catch everything so the app keeps running.
+        latency = round(time.perf_counter() - start_time, 2)
+        category, friendly_message = classify_error(error)
+        logger.error("Request failed | provider=%s | model=%s | category=%s | error_type=%s | seconds=%.2f",
+                     provider_name, model, category, type(error).__name__, latency)
+        return build_result(provider_name, model, latency_seconds=latency,
+                            error=f"{provider_name} request failed: {friendly_message}")
+
+    latency = round(time.perf_counter() - start_time, 2)
+
+    # 3. A successful HTTP call can still come back with no text.
+    if not text:
+        logger.warning("Empty response | provider=%s | model=%s | seconds=%.2f",
+                       provider_name, model, latency)
+        return build_result(
+            provider_name, model, latency_seconds=latency,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            error=f"{provider_name} returned no text. The answer may have been blocked or cut off.",
+        )
+
+    logger.info("Request completed | provider=%s | model=%s | seconds=%.2f | input_tokens=%s | output_tokens=%s",
+                provider_name, model, latency, input_tokens, output_tokens)
+    return build_result(provider_name, model, text=text, latency_seconds=latency,
                         input_tokens=input_tokens, output_tokens=output_tokens)
