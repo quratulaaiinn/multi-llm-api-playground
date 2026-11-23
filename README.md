@@ -19,7 +19,6 @@ Each provider's SDK has a different request format, response shape and error typ
 main.py            # Terminal menu, input and output
 providers.py       # Config, SDK calls, standard result format, error handling
 tests/             # Offline unit tests
-experiments/       # Template for comparing models on six task types
 .env.example       # Template for your API keys and model names
 ```
 
