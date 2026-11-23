@@ -1,10 +1,4 @@
-"""
-main.py - The terminal app the user interacts with.
-
-This file handles the menu, reads prompts, and prints results.
-It never talks to an LLM directly: it calls providers.ask_provider()
-and gets back a standardized result dictionary.
-"""
+"""Terminal front end: menu, prompt input and result display. All API work is in providers.py."""
 
 import logging
 from pathlib import Path
@@ -17,18 +11,14 @@ LOG_FILE = Path(__file__).parent / "logs" / "playground.log"
 LINE = "-" * 40
 DOUBLE_LINE = "=" * 40
 
-# Menu number -> provider name. Adding a provider means adding one line here.
 PROVIDER_MENU_OPTIONS = {"1": "OpenAI", "2": "Gemini", "3": "Claude"}
 COMPARE_OPTION = "4"
 EXIT_OPTION = "5"
 
 
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
+# --- Setup ------------------------------------------------------------------
 
 def setup_logging():
-    """Send log messages to logs/playground.log (not to the screen)."""
     LOG_FILE.parent.mkdir(exist_ok=True)
     logging.basicConfig(
         filename=LOG_FILE,
@@ -36,15 +26,14 @@ def setup_logging():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         encoding="utf-8",
     )
-    # The SDKs' HTTP libraries log every request URL at INFO level.
-    # We only want our own messages, so we quiet them down.
+    # SDK and HTTP libraries log every request URL at INFO; keep only our own messages.
+    # Recent SDKs use httpx2/httpcore2, older ones httpx/httpcore.
     for noisy_logger in ("httpx", "httpx2", "httpcore", "httpcore2",
-                         "openai", "anthropic", "google_genai"):
+                         "openai", "anthropic", "google.genai", "google_genai"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
 def show_configuration_status():
-    """At startup, tell the user which providers are ready to use."""
     print("\nProvider setup check:")
     for provider_name in PROVIDER_NAMES:
         problems = get_config_problems(provider_name)
@@ -54,9 +43,7 @@ def show_configuration_status():
             print(f"  [OK] {provider_name}: ready")
 
 
-# ---------------------------------------------------------------------------
-# Input helpers
-# ---------------------------------------------------------------------------
+# --- Input ------------------------------------------------------------------
 
 def show_menu():
     print()
@@ -72,7 +59,6 @@ def show_menu():
 
 
 def read_prompt():
-    """Ask the user for a prompt. Returns None if they enter nothing."""
     prompt = input("\nEnter your prompt: ").strip()
     if not prompt:
         print("Prompt cannot be empty. Returning to the menu.")
@@ -84,12 +70,9 @@ def wait_for_enter():
     input("\nPress Enter to return to the menu...")
 
 
-# ---------------------------------------------------------------------------
-# Display helpers
-# ---------------------------------------------------------------------------
+# --- Display ----------------------------------------------------------------
 
 def print_metadata(result):
-    """Print time and token counts, skipping any value that is unknown (None)."""
     if result["latency_seconds"] is not None:
         print(f"Execution Time: {result['latency_seconds']:.2f} seconds")
     if result["input_tokens"] is not None:
@@ -99,7 +82,6 @@ def print_metadata(result):
 
 
 def print_result_body(result):
-    """Print the response text, or the error message if the request failed."""
     if result["status"] == "success":
         print("Response:\n")
         print(result["text"])
@@ -141,12 +123,10 @@ def display_comparison(prompt, results, skipped_providers):
 
 
 def format_optional(value, suffix=""):
-    """Show 'n/a' for unknown values instead of pretending we know them."""
     return "n/a" if value is None else f"{value}{suffix}"
 
 
 def print_comparison_summary(results):
-    """A compact table of the numbers side by side. It does not pick a winner."""
     print(LINE)
     print("SUMMARY")
     print(LINE)
@@ -160,12 +140,9 @@ def print_comparison_summary(results):
     print(LINE)
 
 
-# ---------------------------------------------------------------------------
-# Modes
-# ---------------------------------------------------------------------------
+# --- Modes ------------------------------------------------------------------
 
 def explain_missing_configuration(provider_name):
-    """Tell the user exactly what to add to .env for this provider."""
     print(f"\n{provider_name} is not configured yet:")
     for problem in get_config_problems(provider_name):
         print(f"  - {problem}")
@@ -173,8 +150,7 @@ def explain_missing_configuration(provider_name):
 
 
 def run_single_provider(provider_name):
-    # Check the configuration before asking for a prompt, so the user
-    # doesn't type a prompt only to be told the provider can't be used.
+    # Check config before asking for a prompt, so the user doesn't type one for nothing.
     if not is_configured(provider_name):
         explain_missing_configuration(provider_name)
         return
@@ -183,8 +159,7 @@ def run_single_provider(provider_name):
     if prompt is None:
         return
     print(f"\nAsking {provider_name}... please wait.")
-    result = ask_provider(provider_name, prompt)
-    display_single_result(result)
+    display_single_result(ask_provider(provider_name, prompt))
 
 
 def run_comparison():
@@ -203,8 +178,7 @@ def run_comparison():
     if prompt is None:
         return
 
-    # Requests run one after another (sequentially) to keep things simple.
-    # ask_provider never raises, so a failure in one provider doesn't stop the loop.
+    # Sequential on purpose; ask_provider never raises, so one failure doesn't stop the rest.
     results = []
     for provider_name in available:
         print(f"Asking {provider_name}... please wait.")
@@ -213,9 +187,7 @@ def run_comparison():
     display_comparison(prompt, results, skipped)
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
+# --- Main loop --------------------------------------------------------------
 
 def main():
     setup_logging()
@@ -238,7 +210,7 @@ def main():
             break
         else:
             print(f"\n'{choice}' is not a valid option. Please choose 1-{EXIT_OPTION}.")
-            continue  # Show the menu again right away.
+            continue
 
         wait_for_enter()
 
@@ -249,5 +221,4 @@ if __name__ == "__main__":
     try:
         main()
     except (KeyboardInterrupt, EOFError):
-        # Ctrl+C or a closed input stream: exit quietly instead of a traceback.
         print("\n\nExiting. Goodbye!")
